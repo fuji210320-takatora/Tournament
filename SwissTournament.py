@@ -6,9 +6,10 @@ import streamlit as st
 st.set_page_config(page_title="スイス式トーナメント管理", layout="wide")
 
 
-# スイス式のペアリングアルゴリズム関数（同じ勝点の中でランダム、再戦なしを基本とする）
+# スイス式のペアリングアルゴリズム関数（成績上位優先、同じ勝点内はランダム、再戦回避、奇数人は不戦勝）
 def generate_pairings():
   players = st.session_state.players
+  # ポイント降順にソート
   sorted_players = sorted(players, key=lambda x: x["points"], reverse=True)
 
   # 同じ勝点ごとにグループ化し、それぞれのグループ内をランダムにシャッフルする
@@ -22,7 +23,7 @@ def generate_pairings():
   )
   for pt in unique_points:
     group = brackets[pt]
-    random.shuffle(group)  # 同じ勝点の中でランダムにする
+    random.shuffle(group)
     ordered_pool.extend(group)
 
   paired = set()
@@ -36,30 +37,55 @@ def generate_pairings():
       continue
 
     opponent_found = False
-    # 過去に対戦していないプレイヤーを探す
+
+    # 1. まず同じ勝点の中で、まだ対戦していない人を探す
     for j in range(i + 1, len(ordered_pool)):
       p2 = ordered_pool[j]
-      if p2["id"] not in paired and p2["name"] not in p1["opponents"]:
+      if (
+          p2["id"] not in paired
+          and p2["points"] == p1["points"]
+          and p2["name"] not in p1["opponents"]
+      ):
         current_round_matches.append(
-            {"player1": p1, "player2": p2, "result_index": 0}
+            {"player1": p1, "player2": p2, "is_bye": False, "result_index": 0}
         )
         paired.add(p1["id"])
         paired.add(p2["id"])
         opponent_found = True
         break
 
-    # 同じ勝点帯や近隣でどうしても対戦相手が見つからない場合のフォールバック（再戦を許容）
+    # 2. 同じ勝点で相手がいない場合、下の勝点の未対戦の人を探す（成績上位から順に消化）
     if not opponent_found:
       for j in range(i + 1, len(ordered_pool)):
         p2 = ordered_pool[j]
-        if p2["id"] not in paired:
+        if p2["id"] not in paired and p2["name"] not in p1["opponents"]:
           current_round_matches.append(
-              {"player1": p1, "player2": p2, "result_index": 0}
+              {"player1": p1, "player2": p2, "is_bye": False, "result_index": 0}
           )
           paired.add(p1["id"])
           paired.add(p2["id"])
           opponent_found = True
           break
+
+    # 3. それでも見つからない場合（再戦を許容して探す）
+    if not opponent_found:
+      for j in range(i + 1, len(ordered_pool)):
+        p2 = ordered_pool[j]
+        if p2["id"] not in paired:
+          current_round_matches.append(
+              {"player1": p1, "player2": p2, "is_bye": False, "result_index": 0}
+          )
+          paired.add(p1["id"])
+          paired.add(p2["id"])
+          opponent_found = True
+          break
+
+    # 4. 最後まで対戦相手が見つからなかった場合（奇数人の場合の不戦勝：BYE）
+    if not opponent_found and p1["id"] not in paired:
+      current_round_matches.append(
+          {"player1": p1, "player2": None, "is_bye": True, "result_index": 0}
+      )
+      paired.add(p1["id"])
 
     i += 1
 
@@ -68,7 +94,7 @@ def generate_pairings():
 
 # セッション状態の初期化
 if "players" not in st.session_state:
-  st.session_state.players = []  # {"id": int, "name": str, "points": float, "wins": int, "losses": int, "draws": int, "opponents": list}
+  st.session_state.players = []
 if "rounds" not in st.session_state:
   st.session_state.rounds = []
 if "current_round" not in st.session_state:
@@ -145,23 +171,28 @@ else:
     result_options = ["未確定", "プレイヤー1の勝ち", "引き分け", "プレイヤー2の勝ち"]
 
     for i, match in enumerate(current_matches):
-      col1, col2, col3 = st.columns([3, 1, 3])
-      with col1:
-        st.markdown(f"**{match['player1']['name']}**")
-      with col2:
-        st.markdown("VS")
-      with col3:
-        st.markdown(f"**{match['player2']['name']}**")
+      if match["is_bye"]:
+        st.markdown(
+            f"**{match['player1']['name']}** vs 🚫 (不戦勝) —— *自動的に勝ちになります*"
+        )
+        match_results.append("不戦勝")
+      else:
+        col1, col2, col3 = st.columns([3, 1, 3])
+        with col1:
+          st.markdown(f"**{match['player1']['name']}**")
+        with col2:
+          st.markdown("VS")
+        with col3:
+          st.markdown(f"**{match['player2']['name']}**")
 
-      default_index = match.get("result_index", 0)
-
-      res = st.selectbox(
-          f"試合 {i+1}: {match['player1']['name']} vs {match['player2']['name']}",
-          result_options,
-          index=default_index,
-          key=f"match_{round_idx}_{i}",
-      )
-      match_results.append(res)
+        default_index = match.get("result_index", 0)
+        res = st.selectbox(
+            f"試合 {i+1}: {match['player1']['name']} vs {match['player2']['name']}",
+            result_options,
+            index=default_index,
+            key=f"match_{round_idx}_{i}",
+        )
+        match_results.append(res)
       st.markdown("---")
 
     submit_results = st.form_submit_button("ラウンド結果を確定する")
@@ -169,6 +200,8 @@ else:
     if submit_results:
       all_decided = True
       for i, match in enumerate(current_matches):
+        if match["is_bye"]:
+          continue
         res = match_results[i]
         if res == "未確定":
           all_decided = False
@@ -190,33 +223,37 @@ else:
           for m in r_matches:
             p1 = m["player1"]
             p2 = m["player2"]
-
-            if p2["name"] not in p1["opponents"]:
-              p1["opponents"].append(p2["name"])
-            if p1["name"] not in p2["opponents"]:
-              p2["opponents"].append(p1["name"])
-
-            res_idx = m.get("result_index", 0)
             real_p1 = next(
                 p for p in st.session_state.players if p["id"] == p1["id"]
             )
-            real_p2 = next(
-                p for p in st.session_state.players if p["id"] == p2["id"]
-            )
 
-            if res_idx == 1:
+            if m["is_bye"]:
               real_p1["points"] += 1.0
               real_p1["wins"] += 1
-              real_p2["losses"] += 1
-            elif res_idx == 2:
-              real_p1["points"] += 0.5
-              real_p2["points"] += 0.5
-              real_p1["draws"] += 1
-              real_p2["draws"] += 1
-            elif res_idx == 3:
-              real_p2["points"] += 1.0
-              real_p2["wins"] += 1
-              real_p1["losses"] += 1
+            else:
+              real_p2 = next(
+                  p for p in st.session_state.players if p["id"] == p2["id"]
+              )
+
+              if p2["name"] not in p1["opponents"]:
+                p1["opponents"].append(p2["name"])
+              if p1["name"] not in p2["opponents"]:
+                p2["opponents"].append(p1["name"])
+
+              res_idx = m.get("result_index", 0)
+              if res_idx == 1:
+                real_p1["points"] += 1.0
+                real_p1["wins"] += 1
+                real_p2["losses"] += 1
+              elif res_idx == 2:
+                real_p1["points"] += 0.5
+                real_p2["points"] += 0.5
+                real_p1["draws"] += 1
+                real_p2["draws"] += 1
+              elif res_idx == 3:
+                real_p2["points"] += 1.0
+                real_p2["wins"] += 1
+                real_p1["losses"] += 1
 
         st.success("結果を保存しました！")
         st.session_state.results_submitted = True
