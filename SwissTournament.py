@@ -6,13 +6,32 @@ import streamlit as st
 st.set_page_config(page_title="スイス式トーナメント管理", layout="wide")
 
 
-# スイス式のペアリングアルゴリズム関数（成績上位優先、同じ勝点内はランダム、再戦回避、奇数人は不戦勝）
+# スイス式のペアリングアルゴリズム関数
 def generate_pairings():
   players = st.session_state.players
-  # ポイント降順にソート
-  sorted_players = sorted(players, key=lambda x: x["points"], reverse=True)
 
-  # 同じ勝点ごとにグループ化し、それぞれのグループ内をランダムにシャッフルする
+  # 奇数人の場合、まず不戦勝（BYE）になる人を「最下位の勝点グループ」から1人選ぶ
+  bye_player = None
+  active_players = list(players)
+
+  if len(active_players) % 2 != 0:
+    # ポイントが最も低いグループを特定
+    min_points = min(p["points"] for p in active_players)
+    lowest_group = [p for p in active_players if p["points"] == min_points]
+
+    # すでに不戦勝を経験していない人を優先、いなければランダム
+    not_yet_bye = [p for p in lowest_group if p.get("bye_count", 0) == 0]
+    if not_yet_bye:
+      bye_player = random.choice(not_yet_bye)
+    else:
+      bye_player = random.choice(lowest_group)
+
+    # 不戦勝になる人をアクティブプールから外す
+    active_players = [p for p in active_players if p["id"] != bye_player["id"]]
+
+  # 残りの偶数人でペアリングを行う
+  sorted_players = sorted(active_players, key=lambda x: x["points"], reverse=True)
+
   brackets = defaultdict(list)
   for p in sorted_players:
     brackets[p["points"]].append(p)
@@ -23,7 +42,7 @@ def generate_pairings():
   )
   for pt in unique_points:
     group = brackets[pt]
-    random.shuffle(group)
+    random.shuffle(group)  # 同じ勝点の中でランダム
     ordered_pool.extend(group)
 
   paired = set()
@@ -38,7 +57,7 @@ def generate_pairings():
 
     opponent_found = False
 
-    # 1. まず同じ勝点の中で、まだ対戦していない人を探す
+    # 1. 同じ勝点の中で未対戦の人を探す
     for j in range(i + 1, len(ordered_pool)):
       p2 = ordered_pool[j]
       if (
@@ -54,7 +73,7 @@ def generate_pairings():
         opponent_found = True
         break
 
-    # 2. 同じ勝点で相手がいない場合、下の勝点の未対戦の人を探す（成績上位から順に消化）
+    # 2. 同じ勝点にいない場合、下の勝点の未対戦の人を探す（成績上位から消化）
     if not opponent_found:
       for j in range(i + 1, len(ordered_pool)):
         p2 = ordered_pool[j]
@@ -67,7 +86,7 @@ def generate_pairings():
           opponent_found = True
           break
 
-    # 3. それでも見つからない場合（再戦を許容して探す）
+    # 3. それでも見つからない場合（再戦を許容）
     if not opponent_found:
       for j in range(i + 1, len(ordered_pool)):
         p2 = ordered_pool[j]
@@ -80,14 +99,16 @@ def generate_pairings():
           opponent_found = True
           break
 
-    # 4. 最後まで対戦相手が見つからなかった場合（奇数人の場合の不戦勝：BYE）
-    if not opponent_found and p1["id"] not in paired:
-      current_round_matches.append(
-          {"player1": p1, "player2": None, "is_bye": True, "result_index": 0}
-      )
-      paired.add(p1["id"])
-
     i += 1
+
+  # 不戦勝の選手をマッチリストに追加
+  if bye_player:
+    # 状態を更新するために最新のオブジェクトを取得
+    real_bye = next(p for p in st.session_state.players if p["id"] == bye_player["id"])
+    real_bye["bye_count"] = real_bye.get("bye_count", 0) + 1
+    current_round_matches.append(
+        {"player1": real_bye, "player2": None, "is_bye": True, "result_index": 0}
+    )
 
   st.session_state.rounds.append(current_round_matches)
 
@@ -124,6 +145,7 @@ if not st.session_state.tournament_started:
               "wins": 0,
               "losses": 0,
               "draws": 0,
+              "bye_count": 0,
               "opponents": [],
           }
       )
@@ -222,7 +244,6 @@ else:
         for r_idx, r_matches in enumerate(st.session_state.rounds):
           for m in r_matches:
             p1 = m["player1"]
-            p2 = m["player2"]
             real_p1 = next(
                 p for p in st.session_state.players if p["id"] == p1["id"]
             )
@@ -231,14 +252,15 @@ else:
               real_p1["points"] += 1.0
               real_p1["wins"] += 1
             else:
+              p2 = m["player2"]
               real_p2 = next(
                   p for p in st.session_state.players if p["id"] == p2["id"]
               )
 
-              if p2["name"] not in p1["opponents"]:
-                p1["opponents"].append(p2["name"])
-              if p1["name"] not in p2["opponents"]:
-                p2["opponents"].append(p1["name"])
+              if p2["name"] not in real_p1["opponents"]:
+                real_p1["opponents"].append(p2["name"])
+              if real_p1["name"] not in real_p2["opponents"]:
+                real_p2["opponents"].append(real_p1["name"])
 
               res_idx = m.get("result_index", 0)
               if res_idx == 1:
