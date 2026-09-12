@@ -4,6 +4,57 @@ import streamlit as st
 # ページ設定
 st.set_page_config(page_title="スイス式トーナメント管理", layout="wide")
 
+
+# スイス式のペアリングアルゴリズム関数（先に定義する）
+def generate_pairings():
+    # プレイヤーをポイントの降順にソート
+    sorted_players = sorted(
+        st.session_state.players, key=lambda x: x["points"], reverse=True
+    )
+
+    paired = set()
+    current_round_matches = []
+
+    # 簡易的なスイス式ペアリング（上位から順に、まだ対戦していない近いポイントの人と組む）
+    i = 0
+    while i < len(sorted_players):
+        p1 = sorted_players[i]
+        if p1["id"] in paired:
+            i += 1
+            continue
+
+        # まだペアになっておらず、かつ過去に対戦していないプレイヤーを探す
+        opponent_found = False
+        for j in range(i + 1, len(sorted_players)):
+            p2 = sorted_players[j]
+            if p2["id"] not in paired and p2["name"] not in p1["opponents"]:
+                # ペア成立
+                current_round_matches.append(
+                    {"player1": p1, "player2": p2, "result_index": 0}
+                )
+                paired.add(p1["id"])
+                paired.add(p2["id"])
+                opponent_found = True
+                break
+
+        # もし適切な対戦相手が見つからない場合
+        if not opponent_found:
+            for j in range(i + 1, len(sorted_players)):
+                p2 = sorted_players[j]
+                if p2["id"] not in paired:
+                    current_round_matches.append(
+                        {"player1": p1, "player2": p2, "result_index": 0}
+                    )
+                    paired.add(p1["id"])
+                    paired.add(p2["id"])
+                    opponent_found = True
+                    break
+
+        i += 1
+
+    st.session_state.rounds.append(current_round_matches)
+
+
 # セッション状態の初期化
 if "players" not in st.session_state:
     st.session_state.players = []  # {"id": int, "name": str, "points": float, "opponents": list}
@@ -79,6 +130,8 @@ else:
     st.subheader("対戦カードと結果入力")
     with st.form(f"round_{st.session_state.current_round}_form"):
         match_results = []
+        result_options = ["未確定", "プレイヤー1の勝ち", "引き分け", "プレイヤー2の勝ち"]
+        
         for i, match in enumerate(current_matches):
             col1, col2, col3 = st.columns([3, 1, 3])
             with col1:
@@ -88,8 +141,6 @@ else:
             with col3:
                 st.markdown(f"**{match['player2']['name']}**")
 
-            # すでに結果が決まっている場合はそれをデフォルトにする
-            result_options = ["未確定", "プレイヤー1の勝ち", "引き分け", "プレイヤー2の勝ち"]
             default_index = match.get("result_index", 0)
 
             res = st.selectbox(
@@ -104,67 +155,51 @@ else:
         submit_results = st.form_submit_button("ラウンド結果を確定する")
 
         if submit_results:
-            # 結果の保存とポイントの計算
             all_decided = True
             for i, match in enumerate(current_matches):
                 res = match_results[i]
                 if res == "未確定":
                     all_decided = False
                     break
-
                 match["result_index"] = result_options.index(res)
 
             if not all_decided:
                 st.warning("すべての試合の結果を選択してください。")
             else:
-                # ポイント再計算のため、全プレイヤーのポイントをリセットして再計算
                 for p in st.session_state.players:
                     p["points"] = 0.0
                     p["opponents"] = []
 
-                # これまでの全ラウンドの結果を反映
                 for r_idx, r_matches in enumerate(st.session_state.rounds):
                     for m in r_matches:
                         p1 = m["player1"]
                         p2 = m["player2"]
 
-                        # 対戦履歴に追加
-                        # 参照渡し対策としてIDベースで管理するか、名前で記録
-                        # ここではシンプルに相手の名前を記録
-                        # (実際の実装ではIDを使う方が安全ですがシンプル化のため名前を使用)
                         if p2["name"] not in p1["opponents"]:
                             p1["opponents"].append(p2["name"])
                         if p1["name"] not in p2["opponents"]:
                             p2["opponents"].append(p1["name"])
 
                         res_idx = m.get("result_index", 0)
-                        # プレイヤーオブジェクトを最新のセッション状態のものに更新するため検索
                         real_p1 = next(
-                            p
-                            for p in st.session_state.players
-                            if p["id"] == p1["id"]
+                            p for p in st.session_state.players if p["id"] == p1["id"]
                         )
                         real_p2 = next(
-                            p
-                            for p in st.session_state.players
-                            if p["id"] == p2["id"]
+                            p for p in st.session_state.players if p["id"] == p2["id"]
                         )
 
-                        if res_idx == 1:  # P1の勝ち
+                        if res_idx == 1:
                             real_p1["points"] += 1.0
-                        elif res_idx == 2:  # 引き分け
+                        elif res_idx == 2:
                             real_p1["points"] += 0.5
                             real_p2["points"] += 0.5
-                        elif res_idx == 3:  # P2の勝ち
+                        elif res_idx == 3:
                             real_p2["points"] += 1.0
 
                 st.success("結果を保存しました！")
-
-                # 次のラウンドへ進むボタンを表示するためのフラグ
                 st.session_state.results_submitted = True
                 st.rerun()
 
-    # 次ラウンド生成ボタン（現在のラウンドの結果がすべて入力されている場合）
     if st.session_state.get("results_submitted", False):
         if st.button("次ラウンドのペアリングを作成する"):
             st.session_state.current_round += 1
@@ -175,7 +210,6 @@ else:
     # スタンディング（順位表）の表示
     st.subheader("📊 現在の順位表 (スタンディング)")
 
-    # ブッフホルツ係数（対戦相手の平均勝ち点）の計算
     standings_data = []
     for p in st.session_state.players:
         buchholz = 0.0
@@ -194,64 +228,8 @@ else:
             }
         )
 
-    # 勝ち点降順、同点ならブッフホルツ降順でソート
     standings_data.sort(
         key=lambda x: (x["勝ち点"], x["Buchholz(タイブレーク)"]), reverse=True
     )
 
     st.table(standings_data)
-
-
-# スイス式のペアリングアルゴリズム関数
-def generate_pairings():
-    # プレイヤーをポイントの降順にソート
-    sorted_players = sorted(
-        st.session_state.players, key=lambda x: x["points"], reverse=True
-    )
-
-    paired = set()
-    current_round_matches = []
-
-    # 簡易的なスイス式ペアリング（上位から順に、まだ対戦していない近いポイントの人と組む）
-    i = 0
-    while i < len(sorted_players):
-        p1 = sorted_players[i]
-        if p1["id"] in paired:
-            i += 1
-            continue
-
-        # まだペアになっておらず、かつ過去に対戦していないプレイヤーを探す
-        opponent_found = False
-        for j in range(i + 1, len(sorted_players)):
-            p2 = sorted_players[j]
-            if p2["id"] not in paired and p2["name"] not in p1["opponents"]:
-                # ペア成立
-                current_round_matches.append(
-                    {"player1": p1, "player2": p2, "result_index": 0}
-                )
-                paired.add(p1["id"])
-                paired.add(p2["id"])
-                opponent_found = True
-                break
-
-        # もし適切な対戦相手が見つからない場合（奇数人数での不戦勝や再戦回避の妥協）
-        if not opponent_found:
-            for j in range(i + 1, len(sorted_players)):
-                p2 = sorted_players[j]
-                if p2["id"] not in paired:
-                    current_round_matches.append(
-                        {"player1": p1, "player2": p2, "result_index": 0}
-                    )
-                    paired.add(p1["id"])
-                    paired.add(p2["id"])
-                    opponent_found = True
-                    break
-
-        # 奇数人数で最後まで余った人の処理（不戦勝：BYE）
-        if not opponent_found and p1["id"] not in paired:
-            # 簡易的に不戦勝扱いにするなどの処理が必要ですが、今回はシンプルな対戦のみ
-            pass
-
-        i += 1
-
-    st.session_state.rounds.append(current_round_matches)
