@@ -1,379 +1,233 @@
-from collections import defaultdict
-import random
 import streamlit as st
+import random
+import pandas as pd
 
 # ページ設定
-st.set_page_config(page_title="スイス式トーナメント管理", layout="wide")
+st.set_page_config(page_title="大会組み合わせシステム")
 
-
-# スイス式のペアリングアルゴリズム関数
-def generate_pairings():
-  players = st.session_state.players
-
-  # 奇数人の場合、不戦勝（BYE）は最下位の勝点グループから選ぶ
-  bye_player = None
-  active_players = list(players)
-
-  if len(active_players) % 2 != 0:
-    min_points = min(p["points"] for p in active_players)
-    lowest_group = [p for p in active_players if p["points"] == min_points]
-
-    not_yet_bye = [p for p in lowest_group if p.get("bye_count", 0) == 0]
-    if not_yet_bye:
-      bye_player = random.choice(not_yet_bye)
-    else:
-      bye_player = random.choice(lowest_group)
-
-    active_players = [p for p in active_players if p["id"] != bye_player["id"]]
-
-  sorted_players = sorted(active_players, key=lambda x: x["points"], reverse=True)
-
-  brackets = defaultdict(list)
-  for p in sorted_players:
-    brackets[p["points"]].append(p)
-
-  ordered_pool = []
-  unique_points = sorted(
-      list(set(p["points"] for p in sorted_players)), reverse=True
-  )
-  for pt in unique_points:
-    group = brackets[pt]
-    random.shuffle(group)
-    ordered_pool.extend(group)
-
-  paired = set()
-  current_round_matches = []
-
-  i = 0
-  while i < len(ordered_pool):
-    p1 = ordered_pool[i]
-    if p1["id"] in paired:
-      i += 1
-      continue
-
-    opponent_found = False
-
-    # 1. 同じ勝点の中で未対戦の人を探す
-    for j in range(i + 1, len(ordered_pool)):
-      p2 = ordered_pool[j]
-      if (
-          p2["id"] not in paired
-          and p2["points"] == p1["points"]
-          and p2["name"] not in p1["opponents"]
-      ):
-        current_round_matches.append(
-            {"player1": p1, "player2": p2, "is_bye": False, "result_index": 0}
-        )
-        paired.add(p1["id"])
-        paired.add(p2["id"])
-        opponent_found = True
-        break
-
-    # 2. 下の勝点の未対戦の人を探す（成績上位から消化）
-    if not opponent_found:
-      for j in range(i + 1, len(ordered_pool)):
-        p2 = ordered_pool[j]
-        if p2["id"] not in paired and p2["name"] not in p1["opponents"]:
-          current_round_matches.append(
-              {"player1": p1, "player2": p2, "is_bye": False, "result_index": 0}
-          )
-          paired.add(p1["id"])
-          paired.add(p2["id"])
-          opponent_found = True
-          break
-
-    # 3. 再戦を許容して探す
-    if not opponent_found:
-      for j in range(i + 1, len(ordered_pool)):
-        p2 = ordered_pool[j]
-        if p2["id"] not in paired:
-          current_round_matches.append(
-              {"player1": p1, "player2": p2, "is_bye": False, "result_index": 0}
-          )
-          paired.add(p1["id"])
-          paired.add(p2["id"])
-          opponent_found = True
-          break
-
-    i += 1
-
-  if bye_player:
-    real_bye = next(p for p in st.session_state.players if p["id"] == bye_player["id"])
-    real_bye["bye_count"] = real_bye.get("bye_count", 0) + 1
-    current_round_matches.append(
-        {"player1": real_bye, "player2": None, "is_bye": True, "result_index": 0}
-    )
-
-  st.session_state.rounds.append(current_round_matches)
-
-
-# セッション状態の初期化
+# --- セッションステート（状態の保存）の初期化 ---
 if "players" not in st.session_state:
-  st.session_state.players = []
-if "rounds" not in st.session_state:
-  st.session_state.rounds = []
-if "current_round" not in st.session_state:
-  st.session_state.current_round = 0
-if "tournament_started" not in st.session_state:
-  st.session_state.tournament_started = False
-if "tournament_finished" not in st.session_state:
-  st.session_state.tournament_finished = False
+    st.session_state.players = []
+if "phase" not in st.session_state:
+    st.session_state.phase = "setup"  # "setup" または "swiss"
+if "format" not in st.session_state:
+    st.session_state.format = "スイス式トーナメント"
+if "allow_draws" not in st.session_state:
+    st.session_state.allow_draws = "あり"
+if "round" not in st.session_state:
+    st.session_state.round = 1
+if "standings" not in st.session_state:
+    st.session_state.standings = {}
+if "history" not in st.session_state:
+    st.session_state.history = {}
+if "current_pairings" not in st.session_state:
+    st.session_state.current_pairings = []
+if "current_bye" not in st.session_state:
+    st.session_state.current_bye = None
+if "matchups_generated" not in st.session_state:
+    st.session_state.matchups_generated = False
 
+# --- 関数 ---
+def calculate_opo(player):
+    """オポ（対戦相手の勝ち点の合計）を計算"""
+    opo = 0
+    for opp in st.session_state.history[player]:
+        if opp in st.session_state.standings:
+            opo += st.session_state.standings[opp]["points"]
+    return opo
 
-def reset_tournament():
-  st.session_state.players = []
-  st.session_state.rounds = []
-  st.session_state.current_round = 0
-  st.session_state.tournament_started = False
-  st.session_state.tournament_finished = False
+def generate_swiss_pairings():
+    """指定された手順①〜④に基づくスイス式の組み合わせ生成"""
+    players = st.session_state.players
+    standings = st.session_state.standings
+    history = st.session_state.history
 
+    # ④の「やり直し」が無限ループにならないよう最大試行回数を設定
+    max_retries = 1000
+    for _ in range(max_retries):
+        available = list(players)
+        bye = None
 
-# サイドバー：参加者管理
-st.sidebar.header("参加者管理")
-if not st.session_state.tournament_started:
-  new_player_name = st.sidebar.text_input("参加者名")
-  if st.sidebar.button("追加") and new_player_name:
-    if new_player_name not in [p["name"] for p in st.session_state.players]:
-      st.session_state.players.append(
-          {
-              "id": len(st.session_state.players),
-              "name": new_player_name,
-              "points": 0.0,
-              "wins": 0,
-              "losses": 0,
-              "draws": 0,
-              "bye_count": 0,
-              "opponents": [],
-          }
-      )
-      st.sidebar.success(f"{new_player_name} を追加しました")
-    else:
-      st.sidebar.warning("すでに存在する名前です")
+        # ①奇数の場合、一番小さい勝ち点の中からランダムに1人を不戦勝とする
+        if len(available) % 2 != 0:
+            min_pts = min([standings[p]["points"] for p in available])
+            min_players = [p for p in available if standings[p]["points"] == min_pts]
+            bye = random.choice(min_players)
+            available.remove(bye)
 
-  st.sidebar.markdown("---")
-  if st.sidebar.button("トーナメント開始", type="primary"):
-    if len(st.session_state.players) < 2:
-      st.sidebar.error("参加者は2人以上必要です。")
-    else:
-      st.session_state.tournament_started = True
-      st.session_state.current_round = 1
-      generate_pairings()
-      st.rerun()
-else:
-  if st.sidebar.button("トーナメントをリセット"):
-    reset_tournament()
-    st.rerun()
+        # ②勝ち点順に並べる（同じ勝ち点の中でランダム）
+        pts_groups = {}
+        for p in available:
+            pts = standings[p]["points"]
+            if pts not in pts_groups:
+                pts_groups[pts] = []
+            pts_groups[pts].append(p)
 
-# メイン画面
-st.title("🏆 スイス式トーナメント管理アプリ")
+        sorted_available = []
+        # 勝ち点が高い順に処理
+        for pts in sorted(pts_groups.keys(), reverse=True):
+            group = pts_groups[pts]
+            random.shuffle(group) # 同じ勝ち点の中でランダム
+            sorted_available.extend(group)
 
-if not st.session_state.tournament_started:
-  st.info(
-      "左側のサイドバーから参加者を追加し、「トーナメント開始」を押してください。"
-  )
-  st.subheader("現在の参加者一覧")
-  if st.session_state.players:
-    for i, p in enumerate(st.session_state.players, 1):
-      st.write(f"{i}. {p['name']}")
-  else:
-    st.write("まだ参加者が登録されていません。")
+        # ③上から順に対戦相手とする ＆ ④過去の対戦チェック
+        pairings = []
+        valid = True
+        for i in range(0, len(sorted_available), 2):
+            p1 = sorted_available[i]
+            p2 = sorted_available[i+1]
+            if p2 in history[p1]: # 過去に対戦がある場合
+                valid = False
+                break
+            pairings.append((p1, p2))
 
-elif st.session_state.tournament_finished:
-  st.success("🎉 トーナメントが終了しました！最終順位表はこちらです。")
+        # ④チェックを越えたら返す
+        if valid:
+            return pairings, bye
 
-  # 最終順位表の計算と表示
-  standings_data = []
-  for p in st.session_state.players:
-    buchholz = 0.0
-    for opp_name in p["opponents"]:
-      opp = next(
-          (item for item in st.session_state.players if item["name"] == opp_name),
-          None,
-      )
-      if opp:
-        buchholz += opp["points"]
+    # 1000回やり直しても決まらない場合（終盤などで全員が対戦済み等の場合）
+    return None, None 
 
-    standings_data.append(
-        {
-            "名前": p["name"],
-            "勝ち点": p["points"],
-            "戦績": f"{p['wins']}勝 {p['losses']}敗 {p['draws']}分",
-            "Buchholz(タイブレーク)": buchholz,
-        }
-    )
+# --- UI (画面構成) ---
+if st.session_state.phase == "setup":
+    st.title("大会設定 (初期画面)")
 
-  standings_data.sort(
-      key=lambda x: (x["勝ち点"], x["Buchholz(タイブレーク)"]), reverse=True
-  )
+    # 選手登録フォーム
+    st.subheader("選手登録")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        new_player = st.text_input("選手名を入力", key="new_player_input")
+    with col2:
+        # 見た目を合わせるための余白
+        st.write("") 
+        if st.button("登録"):
+            if new_player and new_player not in st.session_state.players:
+                st.session_state.players.append(new_player)
+            elif new_player in st.session_state.players:
+                st.warning("その選手は既に登録されています。")
 
-  # 1位の発表
-  winner = standings_data[0]
-  st.balloons()
-  st.markdown(
-      f"### 👑 優勝: **{winner['name']}** （勝ち点: {winner['勝ち点']}）"
-  )
+    # 登録された選手の一覧表示
+    if st.session_state.players:
+        st.write(f"登録済みの選手（計 {len(st.session_state.players)}人）: ", " / ".join(st.session_state.players))
 
-  st.subheader("📊 最終順位表")
-  st.table(standings_data)
+    # 大会形式
+    st.subheader("大会形式")
+    formats = [
+        "スイス式トーナメント",
+        "トーナメント",
+        "トーナメント+負けトーナメント",
+        "リーグ戦(総当たり)",
+        "リーグ戦+トーナメント"
+    ]
+    selected_format = st.radio("形式を選択", formats)
 
-else:
-  st.header(f"第 {st.session_state.current_round} ラウンド")
+    # 引き分けの有無（トーナメントとトーナメント+負けトーナメントを選択時は表示しない）
+    allow_draws = "なし"
+    if selected_format not in ["トーナメント", "トーナメント+負けトーナメント"]:
+        st.subheader("引き分けの有無")
+        allow_draws = st.radio("設定", ["あり", "なし"])
 
-  round_idx = st.session_state.current_round - 1
-  current_matches = st.session_state.rounds[round_idx]
-
-  st.subheader("対戦カードと結果入力")
-  with st.form(f"round_{st.session_state.current_round}_form"):
-    match_results = []
-    result_options = ["未確定", "プレイヤー1の勝ち", "引き分け", "プレイヤー2の勝ち"]
-
-    for i, match in enumerate(current_matches):
-      if match["is_bye"]:
-        st.markdown(
-            f"**{match['player1']['name']}** vs 🚫 (不戦勝) —— *自動的に勝ちになります*"
-        )
-        match_results.append("不戦勝")
-      else:
-        col1, col2, col3 = st.columns([3, 1, 3])
-        with col1:
-          st.markdown(f"**{match['player1']['name']}**")
-        with col2:
-          st.markdown("VS")
-        with col3:
-          st.markdown(f"**{match['player2']['name']}**")
-
-        default_index = match.get("result_index", 0)
-        res = st.selectbox(
-            f"試合 {i+1}: {match['player1']['name']} vs {match['player2']['name']}",
-            result_options,
-            index=default_index,
-            key=f"match_{round_idx}_{i}",
-        )
-        match_results.append(res)
-      st.markdown("---")
-
-    submit_results = st.form_submit_button("ラウンド結果を確定する")
-
-    if submit_results:
-      all_decided = True
-      for i, match in enumerate(current_matches):
-        if match["is_bye"]:
-          continue
-        res = match_results[i]
-        if res == "未確定":
-          all_decided = False
-          break
-        match["result_index"] = result_options.index(res)
-
-      if not all_decided:
-        st.warning("すべての試合の結果を選択してください。")
-      else:
-        # 全プレイヤーの成績・対戦履歴をリセットして再集計
-        for p in st.session_state.players:
-          p["points"] = 0.0
-          p["wins"] = 0
-          p["losses"] = 0
-          p["draws"] = 0
-          p["opponents"] = []
-
-        for r_idx, r_matches in enumerate(st.session_state.rounds):
-          for m in r_matches:
-            p1 = m["player1"]
-            real_p1 = next(
-                p for p in st.session_state.players if p["id"] == p1["id"]
-            )
-
-            if m["is_bye"]:
-              real_p1["points"] += 1.0
-              real_p1["wins"] += 1
-            else:
-              p2 = m["player2"]
-              real_p2 = next(
-                  p for p in st.session_state.players if p["id"] == p2["id"]
-              )
-
-              if p2["name"] not in real_p1["opponents"]:
-                real_p1["opponents"].append(p2["name"])
-              if real_p1["name"] not in real_p2["opponents"]:
-                real_p2["opponents"].append(real_p1["name"])
-
-              res_idx = m.get("result_index", 0)
-              if res_idx == 1:
-                real_p1["points"] += 1.0
-                real_p1["wins"] += 1
-                real_p2["losses"] += 1
-              elif res_idx == 2:
-                real_p1["points"] += 0.5
-                real_p2["points"] += 0.5
-                real_p1["draws"] += 1
-                real_p2["draws"] += 1
-              elif res_idx == 3:
-                real_p2["points"] += 1.0
-                real_p2["wins"] += 1
-                real_p1["losses"] += 1
-
-        # 優勝者判定のチェック（1位の勝ち点が単独トップかどうか、またはこれ以上ラウンドを続ける必要がないか）
-        # スイス式で単独最高得点者が決まったか、あるいは全プレイヤーのポイントを比較
-        points_list = [p["points"] for p in st.session_state.players]
-        max_pt = max(points_list)
-        # 単独トップかどうか（最高得点が1人だけか）を確認
-        if points_list.count(max_pt) == 1 and st.session_state.current_round >= (
-            len(st.session_state.players) - 1
-        ):
-          # 十分なラウンド数を消化し、単独首位が決まった場合終了とする
-          st.session_state.tournament_finished = True
+    # スタートボタン
+    if st.button("大会スタート"):
+        if len(st.session_state.players) < 2:
+            st.error("選手を2名以上登録してください。")
+        elif selected_format != "スイス式トーナメント":
+            st.error("現在は「スイス式トーナメント」のみ実行可能です。")
         else:
-          # 通常はラウンド数を重ねるが、ユーザーが「1人が勝点優勝した時点」を指定したため、
-          # 単独首位が生まれたかどうか（またはラウンドが進んだ時）で終了判定を行えるようにします。
-          # ※何ラウンド行うかは参加人数によって変わるため、単独トップが確定した段階で終了させたい場合は以下の条件も使えます。
-          pass
+            st.session_state.format = selected_format
+            st.session_state.allow_draws = allow_draws
+            # 成績の初期化
+            for p in st.session_state.players:
+                st.session_state.standings[p] = {"points": 0, "wins": 0, "losses": 0, "draws": 0}
+                st.session_state.history[p] = set()
+            st.session_state.phase = "swiss"
+            st.rerun()
 
-        st.success("結果を保存しました！")
-        st.session_state.results_submitted = True
-        st.rerun()
+elif st.session_state.phase == "swiss":
+    st.title(f"スイス式トーナメント (第{st.session_state.round}回戦)")
 
-  if st.session_state.get("results_submitted", False):
-    # すでに単独首位が確定しているかチェック
-    points_list = [p["points"] for p in st.session_state.players]
-    max_pt = max(points_list)
-    
-    # 全員の試合が終わった段階などで単独トップが1人のみになった、またはこれ以上やる必要がない場合に終了ボタンにするか自動判定
-    if points_list.count(max_pt) == 1 and st.session_state.current_round >= max(2, len(st.session_state.players) // 2):
-      if st.button("優勝者を確定して終了する"):
-        st.session_state.tournament_finished = True
-        st.rerun()
+    # 組み合わせ決定ボタン
+    if not st.session_state.matchups_generated:
+        if st.button(f"第{st.session_state.round}回戦の組み合わせを決める"):
+            pairings, bye = generate_swiss_pairings()
+            if pairings is None and bye is None:
+                st.error("条件を満たす組み合わせが見つかりませんでした（既に対戦相手がいない等）。")
+            else:
+                st.session_state.current_pairings = pairings
+                st.session_state.current_bye = bye
+                st.session_state.matchups_generated = True
+                st.rerun()
     else:
-      if st.button("次ラウンドのペアリングを作成する"):
-        st.session_state.current_round += 1
-        st.session_state.results_submitted = False
-        generate_pairings()
-        st.rerun()
+        st.subheader("対戦表")
+        
+        # 結果入力フォーム
+        with st.form("results_form"):
+            results = {}
+            for idx, (p1, p2) in enumerate(st.session_state.current_pairings):
+                options = [f"▽ {p1}の勝利", f"▽ {p2}の勝利"]
+                if st.session_state.allow_draws == "あり":
+                    options.append("▽ 引き分け")
+                
+                # 対戦結果の選択
+                res = st.selectbox(f"{p1} vs {p2} 結果:", options, key=f"match_{idx}")
+                results[(p1, p2)] = res
 
-  # スタンディング（順位表）の表示
-  st.subheader("📊 現在の順位表 (スタンディング)")
+            # 不戦勝の表示
+            if st.session_state.current_bye:
+                st.info(f"不戦勝: {st.session_state.current_bye}")
 
-  standings_data = []
-  for p in st.session_state.players:
-    buchholz = 0.0
-    for opp_name in p["opponents"]:
-      opp = next(
-          (item for item in st.session_state.players if item["name"] == opp_name),
-          None,
-      )
-      if opp:
-        buchholz += opp["points"]
+            submitted = st.form_submit_button("結果を確定して次の回戦へ")
+            if submitted:
+                # 結果を成績データに反映
+                for (p1, p2), res in results.items():
+                    # 履歴の追加
+                    st.session_state.history[p1].add(p2)
+                    st.session_state.history[p2].add(p1)
+                    
+                    if "の勝利" in res:
+                        winner = p1 if p1 in res else p2
+                        loser = p2 if p1 in res else p1
+                        st.session_state.standings[winner]["wins"] += 1
+                        st.session_state.standings[winner]["points"] += 3
+                        st.session_state.standings[loser]["losses"] += 1
+                    elif "引き分け" in res:
+                        st.session_state.standings[p1]["draws"] += 1
+                        st.session_state.standings[p1]["points"] += 1
+                        st.session_state.standings[p2]["draws"] += 1
+                        st.session_state.standings[p2]["points"] += 1
 
-    standings_data.append(
-        {
-            "名前": p["name"],
-            "勝ち点": p["points"],
-            "戦績": f"{p['wins']}勝 {p['losses']}敗 {p['draws']}分",
-            "Buchholz(タイブレーク)": buchholz,
-        }
-    )
+                # 不戦勝の処理（勝利扱いとし勝ち点3）
+                if st.session_state.current_bye:
+                    bye_p = st.session_state.current_bye
+                    st.session_state.standings[bye_p]["wins"] += 1
+                    st.session_state.standings[bye_p]["points"] += 3
 
-  standings_data.sort(
-      key=lambda x: (x["勝ち点"], x["Buchholz(タイブレーク)"]), reverse=True
-  )
+                # ラウンドを進める
+                st.session_state.round += 1
+                st.session_state.matchups_generated = False
+                st.rerun()
 
-  st.table(standings_data)
+    st.markdown("---")
+    st.subheader("順位表")
+    
+    # 順位表データの作成
+    table_data = []
+    for p in st.session_state.players:
+        s = st.session_state.standings[p]
+        opo = calculate_opo(p)
+        table_data.append({
+            "選手": p,
+            "勝ち点": s["points"],
+            "オポ": opo,
+            "勝利": s["wins"],
+            "敗北": s["losses"],
+            "引分": s["draws"],
+        })
+    
+    # 勝ち点 -> オポ の優先順位で並び替えて表示
+    df = pd.DataFrame(table_data)
+    if not df.empty:
+        df = df.sort_values(by=["勝ち点", "オポ"], ascending=[False, False]).reset_index(drop=True)
+        df.index = df.index + 1
+        df.index.name = "順位"
+        st.dataframe(df, use_container_width=True)
