@@ -42,25 +42,36 @@ def add_player():
 
 def calculate_win_rate(player):
     """個人の勝率を計算（最低33%保証ルール適用）"""
-    # 不戦勝(BYE)は対戦数から除外
-    matches = len([opp for opp in st.session_state.history[player] if opp != "BYE"])
+    # 自身の勝率を計算する際は、不戦勝(BYE)も1試合(1勝)として分母に含めます
+    # （※セット型なので、戦った相手の数＋BYEの有無で総ラウンド数になります）
+    matches = len(st.session_state.history[player])
     if matches == 0:
         return 0.33
+    
     pts = st.session_state.standings[player]["points"]
     wr = pts / (matches * 3) # 1試合最大3ポイント計算
+    
+    # 33%を下回る場合は33%として扱う（TCGマイスター等の独自ルール）
     return max(wr, 0.33)
 
 def calculate_omw(player):
     """OMW% (対戦相手の勝率の平均) を計算"""
+    # ★ 不戦勝(BYE)は架空の相手なので、対戦相手のリストから除外する
     opponents = [opp for opp in st.session_state.history[player] if opp != "BYE"]
+    
     if not opponents:
         return 0.0
+    
+    # 実際に対戦した相手の勝率（33%補正適用済み）の合計
     omw_sum = sum(calculate_win_rate(opp) for opp in opponents)
+    
+    # 実際に対戦した人数で割る（BYEの分は計算から完全に除外されている）
     return (omw_sum / len(opponents)) * 100
 
 def calculate_katte_ruiten(player):
     """勝手累点 (自分が勝利した相手の累計勝ち点の合計) を計算"""
     total = 0
+    # 不戦勝(BYE)は defeated(勝利した相手リスト) には入らないため、自動的に除外されます
     for opp in st.session_state.defeated[player]:
         if opp in st.session_state.standings:
             total += st.session_state.standings[opp]["points"]
